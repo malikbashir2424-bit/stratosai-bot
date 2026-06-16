@@ -59,7 +59,7 @@ async function getOrCreateUser(msg) {
 
   if (!user) {
     const refCode = genRefCode(tid);
-    const { data: newUser } = await supabase
+    const { data: newUser, error } = await supabase
       .from('users')
       .insert({
         telegram_id: tid,
@@ -68,9 +68,11 @@ async function getOrCreateUser(msg) {
         referral_code: refCode,
         points: 0,
       })
-      .select()
+      .select('*')
       .single();
-    user = newUser;
+    
+    if(error) console.error('Insert error:', error);
+    user = newUser || { telegram_id: tid, first_name: firstName, username, points: 0, referral_code: refCode };
   }
 
   // Update name/username if changed
