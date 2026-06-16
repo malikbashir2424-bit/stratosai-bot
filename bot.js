@@ -47,9 +47,9 @@ function genRefCode(telegramId) {
 
 // Get or create user
 async function getOrCreateUser(msg) {
-  const tid = msg.from.id;
-  const username = msg.from.username || null;
-  const firstName = msg.from.first_name || 'User';
+  const tid = msg.from ? msg.from.id : msg.id;
+  const username = msg.from ? msg.from.username : msg.username || null;
+  const firstName = msg.from ? msg.from.first_name : msg.first_name || 'User';
 
   let { data: user } = await supabase
     .from('users')
@@ -71,6 +71,13 @@ async function getOrCreateUser(msg) {
       .select()
       .single();
     user = newUser;
+  }
+
+  // Update name/username if changed
+  if (user && (user.username !== username || user.first_name !== firstName)) {
+    await supabase.from('users').update({ username, first_name: firstName }).eq('telegram_id', tid);
+    user.username = username;
+    user.first_name = firstName;
   }
 
   return user;
