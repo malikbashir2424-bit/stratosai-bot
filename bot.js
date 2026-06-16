@@ -8,9 +8,14 @@ const { createClient } = require('@supabase/supabase-js');
 // ═══════════════════════════════════════
 // CONFIG
 // ═══════════════════════════════════════
-const BOT_TOKEN   = process.env.BOT_TOKEN   || '8868411713:AAGkcSHNrILjBxnrh6HziO-An0pF4rYeaTg';
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://eodmgkcjytkhilxfyvrr.supabase.co';
-const SUPABASE_KEY = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVvZG1na2NqeXRraGlseGZ5dnJyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE2MTE3MzYsImV4cCI6MjA5NzE4NzczNn0.-nNJ1LLZOatrkaanyfd07ZTJ7IYiBXUA1jiUfaeXs3I';
+const BOT_TOKEN    = process.env.BOT_TOKEN;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
+
+if(!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_KEY){
+  console.error('Missing environment variables! Set BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY');
+  process.exit(1);
+}
 
 const CHANNEL_ID      = '@stratosAi_official';
 const TWITTER_URL     = 'https://x.com/stratosaig';
