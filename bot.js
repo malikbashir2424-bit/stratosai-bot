@@ -112,7 +112,7 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
 
   const keyboard = {
     inline_keyboard: [
-      [{ text: '🌐 Main Site', url: WEBSITE_URL }, { text: '🎯 Sportsbook', url: SPORTSBOOK_URL }],
+      [{ text: '🌐 Main Site', url: WEBSITE_URL }, { text: '🎯 Sportsbook', url: SPORTSBOOK_URL + '?tgid=' + msg.from.id }],
       [{ text: '📢 Telegram Channel', url: 'https://t.me/stratosAi_official' }, { text: '🐦 Twitter / X', url: TWITTER_URL }],
       [{ text: '✅ Tasks & Earn Points', callback_data: 'tasks' }],
       [{ text: '👤 My Profile', callback_data: 'profile' }, { text: '🏆 Leaderboard', callback_data: 'leaderboard' }],
@@ -358,7 +358,7 @@ bot.on('callback_query', async (query) => {
         {
           parse_mode: 'Markdown',
           reply_markup: { inline_keyboard: [
-            [{ text: '🌐 Visit Main Site', url: WEBSITE_URL }, { text: '🎯 Open Sportsbook', url: SPORTSBOOK_URL }],
+            [{ text: '🌐 Visit Main Site', url: WEBSITE_URL }, { text: '🎯 Open Sportsbook', url: SPORTSBOOK_URL + '?tgid=' + telegramId }],
             [{ text: `✅ I Visited! Claim +${POINTS.visit_website} pts`, callback_data: 'verify_website' }]
           ]}
         }
