@@ -381,6 +381,98 @@ bot.on('callback_query', async (query) => {
 });
 
 // ═══════════════════════════════════════
+// /streak COMMAND — show user's daily streak
+// ═══════════════════════════════════════
+bot.onText(/\/streak/, async (msg) => {
+  const telegramId = msg.from.id;
+  try {
+    const { data: u } = await supabase
+      .from('users')
+      .select('streak_count, longest_streak, points, shield_active, last_checkin')
+      .eq('telegram_id', telegramId)
+      .single();
+    if (!u) {
+      bot.sendMessage(msg.chat.id, 'Send /start first to join STRATOS AI!');
+      return;
+    }
+    const streak = u.streak_count || 0;
+    const longest = u.longest_streak || 0;
+    const shield = u.shield_active ? '🛡 Active' : '— None';
+    const nextWeekly = streak % 7 === 0 ? 7 : 7 - (streak % 7);
+    bot.sendMessage(msg.chat.id,
+      `🔥 *Your Daily Streak*\n\n` +
+      `Current streak: *${streak} day${streak === 1 ? '' : 's'}*\n` +
+      `Longest streak: *${longest} days*\n` +
+      `Streak Shield: ${shield}\n` +
+      `Total points: *${(u.points || 0).toLocaleString()} \\$STRAT*\n\n` +
+      `Next weekly bonus (+2000) in *${nextWeekly} day${nextWeekly === 1 ? '' : 's'}*\n\n` +
+      `Check in daily on the platform to keep your streak alive! 🚀`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: [[
+          { text: '✅ Check In Now', url: SPORTSBOOK_URL + '?tgid=' + telegramId }
+        ]]}
+      }
+    );
+  } catch (e) {
+    bot.sendMessage(msg.chat.id, 'Could not load your streak. Try again later.');
+  }
+});
+
+// ═══════════════════════════════════════
+// DAILY REMINDER NOTIFICATIONS
+// Every 20h, remind users who haven't checked in today.
+// Each user is reminded at most once per ~20h window.
+// ═══════════════════════════════════════
+const REMINDER_INTERVAL = 60 * 60 * 1000;       // scan every 1 hour
+const NOTIFY_COOLDOWN    = 20 * 60 * 60 * 1000;  // 20h between reminders per user
+
+async function sendDailyReminders() {
+  try {
+    const cutoff = new Date(Date.now() - NOTIFY_COOLDOWN).toISOString();
+    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+
+    // Users who: haven't checked in today AND weren't notified in last 20h
+    const { data: users } = await supabase
+      .from('users')
+      .select('telegram_id, streak_count, last_checkin, last_notified')
+      .or(`last_notified.is.null,last_notified.lt.${cutoff}`)
+      .limit(200);
+
+    if (!users || !users.length) return;
+
+    for (const u of users) {
+      // Skip if already checked in today
+      if (u.last_checkin && new Date(u.last_checkin) >= todayStart) continue;
+
+      const streak = u.streak_count || 0;
+      const msg = streak > 0
+        ? `🔥 *Don't lose your ${streak}-day streak!*\n\nCheck in today on STRATOS AI to keep it alive and earn your daily \\$STRAT points.`
+        : `🎯 *Your daily \\$STRAT points are waiting!*\n\nCheck in on STRATOS AI today and start a winning streak. 7 days + wallet = *+2000 bonus*!`;
+
+      bot.sendMessage(u.telegram_id, msg, {
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: [[
+          { text: '✅ Check In Now', url: SPORTSBOOK_URL + '?tgid=' + u.telegram_id }
+        ]]}
+      }).catch(() => {});
+
+      // Mark notified
+      await supabase.from('users')
+        .update({ last_notified: new Date().toISOString() })
+        .eq('telegram_id', u.telegram_id);
+
+      // Gentle pacing to avoid Telegram rate limits
+      await new Promise(r => setTimeout(r, 120));
+    }
+    console.log(`[Reminders] Processed ${users.length} candidates`);
+  } catch (e) {
+    console.error('Reminder error:', e.message);
+  }
+}
+setInterval(sendDailyReminders, REMINDER_INTERVAL);
+
+// ═══════════════════════════════════════
 // WEBHOOK SERVER — Platform Events
 // POST /webhook with JSON: { telegramId, eventType }
 // eventType: visit_sportsbook | connect_wallet | place_bet | winning_bet
@@ -392,36 +484,86 @@ const EVENT_CONFIG = {
   winning_bet:      { points: POINTS.winning_bet,       field: 'task_winning_bet',       label: 'Winning Bet',     emoji: '🏆' },
 };
 
+// ── Simple in-memory rate limiter (per IP) ──
+const rateBucket = new Map(); // ip -> {count, resetAt}
+function rateLimited(ip){
+  const now = Date.now();
+  const win = 60000; // 1 min window
+  const max = 20;    // max 20 webhook calls/min/IP
+  let b = rateBucket.get(ip);
+  if(!b || now > b.resetAt){ b = { count:0, resetAt: now+win }; rateBucket.set(ip, b); }
+  b.count++;
+  return b.count > max;
+}
+// Cleanup old buckets every 5 min
+setInterval(()=>{ const now=Date.now(); for(const [k,v] of rateBucket){ if(now>v.resetAt) rateBucket.delete(k); } }, 300000);
+
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || '';
+
 const server = http.createServer(async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  const origin = 'https://stratosai.bet';
+  res.setHeader('Access-Control-Allow-Origin', origin);
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Webhook-Secret');
 
   if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
+
+  // Health check endpoint (safe, read-only)
+  if (req.method === 'GET' && req.url === '/health') {
+    res.writeHead(200, {'Content-Type':'application/json'});
+    res.end(JSON.stringify({ status:'ok', uptime: process.uptime() }));
+    return;
+  }
+
   if (req.method !== 'POST' || req.url !== '/webhook') {
     res.writeHead(404); res.end('Not found'); return;
   }
 
+  // Rate limit by IP
+  const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
+  if (rateLimited(ip)) {
+    res.writeHead(429); res.end(JSON.stringify({ error: 'Too many requests' })); return;
+  }
+
+  // Verify shared secret (set WEBHOOK_SECRET in Railway + send from site)
+  if (WEBHOOK_SECRET) {
+    const provided = req.headers['x-webhook-secret'];
+    if (provided !== WEBHOOK_SECRET) {
+      res.writeHead(401); res.end(JSON.stringify({ error: 'Unauthorized' })); return;
+    }
+  }
+
   let body = '';
-  req.on('data', chunk => body += chunk);
+  req.on('data', chunk => {
+    body += chunk;
+    if (body.length > 1e4) { req.destroy(); } // cap body size
+  });
   req.on('end', async () => {
     try {
-      const { telegramId, eventType } = JSON.parse(body);
-      if (!telegramId || !eventType) { res.writeHead(400); res.end('Missing fields'); return; }
+      const parsed = JSON.parse(body);
+      let { telegramId, eventType } = parsed;
+
+      // Validate telegramId is a positive integer
+      telegramId = parseInt(telegramId);
+      if (!telegramId || telegramId <= 0 || !Number.isInteger(telegramId)) {
+        res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid telegramId' })); return;
+      }
+      if (!eventType || typeof eventType !== 'string') {
+        res.writeHead(400); res.end(JSON.stringify({ error: 'Missing fields' })); return;
+      }
 
       const cfg = EVENT_CONFIG[eventType];
-      if (!cfg) { res.writeHead(400); res.end('Unknown event'); return; }
+      if (!cfg) { res.writeHead(400); res.end(JSON.stringify({ error: 'Unknown event' })); return; }
 
-      // Check not already claimed
+      // User must already exist (registered via /start) — blocks random IDs
       const { data: user } = await supabase.from('users').select('*').eq('telegram_id', telegramId).single();
-      if (!user) { res.writeHead(404); res.end('User not found'); return; }
+      if (!user) { res.writeHead(404); res.end(JSON.stringify({ error: 'User not found' })); return; }
       if (user[cfg.field]) { res.writeHead(200); res.end(JSON.stringify({ status: 'already_done' })); return; }
 
-      // Award points
+      // Award points (each event once per user)
       await supabase.from('users').update({ [cfg.field]: true }).eq('telegram_id', telegramId);
       await addPoints(telegramId, cfg.points, eventType);
 
-      // Notify user in Telegram
       bot.sendMessage(telegramId,
         `${cfg.emoji} *+${cfg.points} $STRAT points!*\n\n` +
         `Task completed: *${cfg.label}*\n\n` +
@@ -431,8 +573,8 @@ const server = http.createServer(async (req, res) => {
 
       res.writeHead(200); res.end(JSON.stringify({ status: 'ok', points: cfg.points }));
     } catch(e) {
-      console.error('Webhook error:', e);
-      res.writeHead(500); res.end('Server error');
+      console.error('Webhook error:', e.message);
+      res.writeHead(500); res.end(JSON.stringify({ error: 'Server error' }));
     }
   });
 });
