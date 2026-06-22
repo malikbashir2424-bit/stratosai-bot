@@ -310,10 +310,8 @@ bot.on('callback_query', async (query) => {
           bot.sendMessage(chatId, '❌ You haven\'t joined yet. Please join the channel first!');
         }
       } catch(e) {
-        // Benefit of doubt
-        await supabase.from('users').update({ task_joined_channel: true }).eq('telegram_id', telegramId);
-        await addPoints(telegramId, POINTS.join_channel, 'join_channel');
-        bot.sendMessage(chatId, `✅ *+${POINTS.join_channel} $STRAT points added!*`, { parse_mode: 'Markdown' });
+        console.error('verify_channel getChatMember failed:', e.message);
+        bot.sendMessage(chatId, '⚠️ Could not verify your membership right now. Please make sure you joined @stratosAi_official, then tap "I Joined" again in a moment.');
       }
       break;
 
