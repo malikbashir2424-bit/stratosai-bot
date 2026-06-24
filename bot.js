@@ -221,22 +221,27 @@ async function showTasks(chatId, telegramId) {
 // LEADERBOARD
 // ═══════════════════════════════════════
 async function showLeaderboard(chatId) {
-  const { data: users } = await supabase.from('leaderboard').select('*').limit(20);
-  if (!users || !users.length) { bot.sendMessage(chatId, '🏆 Leaderboard is empty. Be the first!'); return; }
+  try {
+    const { data: users } = await supabase.from('leaderboard').select('*').limit(20);
+    if (!users || !users.length) { bot.sendMessage(chatId, '🏆 Leaderboard is empty. Be the first!'); return; }
 
-  const medals = ['🥇', '🥈', '🥉'];
-  const list = users.map((u, i) => {
-    const medal = medals[i] || `${i + 1}.`;
-    const name = u.username ? `@${u.username}` : u.first_name || 'Anonymous';
-    return `${medal} ${name} — *${u.points} pts*`;
-  }).join('\n');
+    const medals = ['🥇', '🥈', '🥉'];
+    const list = users.map((u, i) => {
+      const medal = medals[i] || `${i + 1}.`;
+      let name = u.username ? `@${u.username}` : (u.first_name || 'Anonymous');
+      name = String(name).replace(/[_*`\[\]()~>#+\-=|{}.!]/g, '');
+      const pts = (u.points || 0).toLocaleString();
+      return `${medal} ${name} — ${pts} pts`;
+    }).join('\n');
 
-  bot.sendMessage(chatId,
-    `🏆 *STRATOS AI Leaderboard*\n\n${list}\n\n_Complete tasks & refer friends to climb the ranks!_`,
-    { parse_mode: 'Markdown' }
-  );
+    bot.sendMessage(chatId,
+      `🏆 STRATOS AI Leaderboard\n\n${list}\n\nComplete tasks & refer friends to climb the ranks!`
+    );
+  } catch (e) {
+    console.error('showLeaderboard error:', e.message);
+    bot.sendMessage(chatId, 'Could not load the leaderboard right now. Try again in a moment.');
+  }
 }
-
 // ═══════════════════════════════════════
 // REFERRAL
 // ═══════════════════════════════════════
