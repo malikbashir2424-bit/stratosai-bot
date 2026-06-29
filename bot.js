@@ -1,10 +1,12 @@
 // STRATOS AI Telegram Bot - Updated
 // Deploy on Railway.app
 // Required env vars: BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY
+// Optional env vars: WEBHOOK_SECRET, MINIAPP_URL
 
 const TelegramBot = require('node-telegram-bot-api');
 const { createClient } = require('@supabase/supabase-js');
 const http = require('http');
+const crypto = require('crypto');
 
 // ═══════════════════════════════════════
 // CONFIG
@@ -23,6 +25,8 @@ const CHANNEL_ID      = '@stratosAi_official';
 const TWITTER_URL     = 'https://x.com/stratosaig';
 const WEBSITE_URL     = 'https://stratosai.net';
 const SPORTSBOOK_URL  = 'https://stratosai.bet';
+// Mini App URL (where app.html is hosted — must be HTTPS)
+const MINIAPP_URL     = process.env.MINIAPP_URL || 'https://stratosai.net/app.html';
 
 // Points
 const POINTS = {
@@ -94,6 +98,38 @@ async function checkAlreadyDone(telegramId, taskField) {
 }
 
 // ═══════════════════════════════════════
+// Verify Telegram Mini App initData
+// Returns parsed user object if valid, else null.
+// ═══════════════════════════════════════
+function verifyInitData(initData) {
+  try {
+    const params = new URLSearchParams(initData);
+    const hash = params.get('hash');
+    if (!hash) return null;
+
+    params.delete('hash');
+    const pairs = [];
+    for (const [k, v] of params.entries()) pairs.push(`${k}=${v}`);
+    pairs.sort();
+    const dataCheckString = pairs.join('\n');
+
+    const secretKey = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
+    const computed = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+    if (computed !== hash) return null;
+
+    // Replay protection: reject initData older than 24h
+    const authDate = parseInt(params.get('auth_date') || '0', 10);
+    if (authDate && (Date.now() / 1000 - authDate) > 86400) return null;
+
+    const userJson = params.get('user');
+    if (!userJson) return null;
+    return JSON.parse(userJson);
+  } catch (e) {
+    return null;
+  }
+}
+
+// ═══════════════════════════════════════
 // /start
 // ═══════════════════════════════════════
 bot.onText(/\/start(.*)/, async (msg, match) => {
@@ -112,6 +148,7 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
 
   const keyboard = {
     inline_keyboard: [
+      [{ text: '📊 Open Dashboard', web_app: { url: MINIAPP_URL } }],
       [{ text: '🌐 Main Site', url: WEBSITE_URL }, { text: '🎯 Sportsbook', url: SPORTSBOOK_URL + '?tgid=' + msg.from.id }],
       [{ text: '📢 Telegram Channel', url: 'https://t.me/stratosAi_official' }, { text: '🐦 Twitter / X', url: TWITTER_URL }],
       [{ text: '✅ Tasks & Earn Points', callback_data: 'tasks' }],
@@ -162,7 +199,6 @@ async function showTasks(chatId, telegramId) {
 
   const keyboard = {
     inline_keyboard: [
-      // Social tasks
       [{
         text: user.task_joined_channel ? `✅ Joined Channel (+${POINTS.join_channel})` : `📣 Join Channel (+${POINTS.join_channel} pts)`,
         callback_data: user.task_joined_channel ? 'already_done' : 'task_channel'
@@ -175,7 +211,6 @@ async function showTasks(chatId, telegramId) {
         text: user.task_visited_website ? `✅ Visited Website (+${POINTS.visit_website})` : `🌐 Visit Website (+${POINTS.visit_website} pts)`,
         callback_data: user.task_visited_website ? 'already_done' : 'task_website'
       }],
-      // Platform events
       [{ text: '─── Platform Events ───', callback_data: 'noop' }],
       [{
         text: user.task_visit_sportsbook ? `✅ StratosAI.bet (+${POINTS.visit_sportsbook})` : `🎯 StratosAI.bet (+${POINTS.visit_sportsbook} pts)`,
@@ -301,7 +336,6 @@ bot.on('callback_query', async (query) => {
       break;
 
     case 'verify_channel':
-      // Anti-spam: check not already done
       if (await checkAlreadyDone(telegramId, 'task_joined_channel')) {
         bot.sendMessage(chatId, '✅ Already claimed!'); break;
       }
@@ -338,15 +372,12 @@ bot.on('callback_query', async (query) => {
       if (await checkAlreadyDone(telegramId, 'task_followed_twitter')) {
         bot.sendMessage(chatId, '✅ Already claimed!'); break;
       }
-      // Set pending with timestamp
       pendingTwitter.set(telegramId, Date.now());
       bot.sendMessage(chatId, '⏳ Verifying your follow... please wait 10 seconds.');
-      // 10-second lazy verification
       setTimeout(async () => {
         const pending = pendingTwitter.get(telegramId);
         if (!pending) return;
         pendingTwitter.delete(telegramId);
-        // Check still not done (anti-double-claim)
         if (await checkAlreadyDone(telegramId, 'task_followed_twitter')) return;
         await supabase.from('users').update({ task_followed_twitter: true }).eq('telegram_id', telegramId);
         await addPoints(telegramId, POINTS.follow_twitter, 'follow_twitter');
@@ -424,8 +455,6 @@ bot.onText(/\/streak/, async (msg) => {
 
 // ═══════════════════════════════════════
 // DAILY REMINDER NOTIFICATIONS
-// Every 20h, remind users who haven't checked in today.
-// Each user is reminded at most once per ~20h window.
 // ═══════════════════════════════════════
 const REMINDER_INTERVAL = 60 * 60 * 1000;       // scan every 1 hour
 const NOTIFY_COOLDOWN    = 20 * 60 * 60 * 1000;  // 20h between reminders per user
@@ -435,7 +464,6 @@ async function sendDailyReminders() {
     const cutoff = new Date(Date.now() - NOTIFY_COOLDOWN).toISOString();
     const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
 
-    // Users who: haven't checked in today AND weren't notified in last 20h
     const { data: users } = await supabase
       .from('users')
       .select('telegram_id, streak_count, last_checkin, last_notified')
@@ -445,7 +473,6 @@ async function sendDailyReminders() {
     if (!users || !users.length) return;
 
     for (const u of users) {
-      // Skip if already checked in today
       if (u.last_checkin && new Date(u.last_checkin) >= todayStart) continue;
 
       const streak = u.streak_count || 0;
@@ -460,12 +487,10 @@ async function sendDailyReminders() {
         ]]}
       }).catch(() => {});
 
-      // Mark notified
       await supabase.from('users')
         .update({ last_notified: new Date().toISOString() })
         .eq('telegram_id', u.telegram_id);
 
-      // Gentle pacing to avoid Telegram rate limits
       await new Promise(r => setTimeout(r, 120));
     }
     console.log(`[Reminders] Processed ${users.length} candidates`);
@@ -476,9 +501,7 @@ async function sendDailyReminders() {
 setInterval(sendDailyReminders, REMINDER_INTERVAL);
 
 // ═══════════════════════════════════════
-// WEBHOOK SERVER — Platform Events
-// POST /webhook with JSON: { telegramId, eventType }
-// eventType: visit_sportsbook | connect_wallet | place_bet | winning_bet
+// WEBHOOK SERVER — Platform Events + Mini App
 // ═══════════════════════════════════════
 const EVENT_CONFIG = {
   visit_sportsbook: { points: POINTS.visit_sportsbook, field: 'task_visit_sportsbook',  label: 'StratosAI.bet',    emoji: '🎯' },
@@ -488,24 +511,25 @@ const EVENT_CONFIG = {
 };
 
 // ── Simple in-memory rate limiter (per IP) ──
-const rateBucket = new Map(); // ip -> {count, resetAt}
+const rateBucket = new Map();
 function rateLimited(ip){
   const now = Date.now();
-  const win = 60000; // 1 min window
-  const max = 20;    // max 20 webhook calls/min/IP
+  const win = 60000;
+  const max = 20;
   let b = rateBucket.get(ip);
   if(!b || now > b.resetAt){ b = { count:0, resetAt: now+win }; rateBucket.set(ip, b); }
   b.count++;
   return b.count > max;
 }
-// Cleanup old buckets every 5 min
 setInterval(()=>{ const now=Date.now(); for(const [k,v] of rateBucket){ if(now>v.resetAt) rateBucket.delete(k); } }, 300000);
 
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || '';
+const ALLOWED_ORIGINS = ['https://stratosai.bet', 'https://stratosai.net'];
 
 const server = http.createServer(async (req, res) => {
-  const origin = 'https://stratosai.bet';
-  res.setHeader('Access-Control-Allow-Origin', origin);
+  // CORS allow-list (sportsbook + main site/mini app)
+  const reqOrigin = req.headers.origin;
+  res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGINS.includes(reqOrigin) ? reqOrigin : ALLOWED_ORIGINS[0]);
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Webhook-Secret');
 
@@ -515,6 +539,60 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, {'Content-Type':'application/json'});
     res.end(JSON.stringify({ status:'ok', uptime: process.uptime() }));
+    return;
+  }
+
+  // ── MINI APP DATA (verified via Telegram initData) ──
+  if (req.method === 'POST' && req.url === '/miniapp-data') {
+    const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
+    if (rateLimited(ip)) { res.writeHead(429); res.end(JSON.stringify({ error: 'Too many requests' })); return; }
+
+    let body = '';
+    req.on('data', chunk => { body += chunk; if (body.length > 1e4) req.destroy(); });
+    req.on('end', async () => {
+      try {
+        const { initData } = JSON.parse(body || '{}');
+        const tgUser = verifyInitData(initData);
+        if (!tgUser || !tgUser.id) {
+          res.writeHead(401); res.end(JSON.stringify({ error: 'Invalid initData' })); return;
+        }
+        const telegramId = tgUser.id;
+
+        // Ensure the user exists (auto-create on first dashboard open)
+        await getOrCreateUser({ from: tgUser });
+
+        const { data: user } = await supabase
+          .from('users').select('*').eq('telegram_id', telegramId).single();
+        if (!user) { res.writeHead(404); res.end(JSON.stringify({ error: 'User not found' })); return; }
+
+        const { count: referralCount } = await supabase
+          .from('referrals').select('*', { count: 'exact' }).eq('referrer_id', telegramId);
+
+        let rank = '—';
+        try {
+          const { count: ahead } = await supabase
+            .from('users').select('telegram_id', { count: 'exact' }).gt('points', user.points || 0);
+          rank = '#' + ((ahead || 0) + 1);
+        } catch (e) {}
+
+        const { data: leaderboard } = await supabase
+          .from('users')
+          .select('telegram_id,username,first_name,points,streak_count')
+          .order('points', { ascending: false })
+          .limit(20);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          user,
+          referralCount: referralCount || 0,
+          rank,
+          leaderboard: leaderboard || []
+        }));
+      } catch (e) {
+        console.error('miniapp-data error:', e.message);
+        res.writeHead(500); res.end(JSON.stringify({ error: 'Server error' }));
+      }
+    });
     return;
   }
 
@@ -528,7 +606,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(429); res.end(JSON.stringify({ error: 'Too many requests' })); return;
   }
 
-  // Verify shared secret (set WEBHOOK_SECRET in Railway + send from site)
+  // Verify shared secret
   if (WEBHOOK_SECRET) {
     const provided = req.headers['x-webhook-secret'];
     if (provided !== WEBHOOK_SECRET) {
@@ -539,14 +617,13 @@ const server = http.createServer(async (req, res) => {
   let body = '';
   req.on('data', chunk => {
     body += chunk;
-    if (body.length > 1e4) { req.destroy(); } // cap body size
+    if (body.length > 1e4) { req.destroy(); }
   });
   req.on('end', async () => {
     try {
       const parsed = JSON.parse(body);
       let { telegramId, eventType } = parsed;
 
-      // Validate telegramId is a positive integer
       telegramId = parseInt(telegramId);
       if (!telegramId || telegramId <= 0 || !Number.isInteger(telegramId)) {
         res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid telegramId' })); return;
@@ -558,12 +635,10 @@ const server = http.createServer(async (req, res) => {
       const cfg = EVENT_CONFIG[eventType];
       if (!cfg) { res.writeHead(400); res.end(JSON.stringify({ error: 'Unknown event' })); return; }
 
-      // User must already exist (registered via /start) — blocks random IDs
       const { data: user } = await supabase.from('users').select('*').eq('telegram_id', telegramId).single();
       if (!user) { res.writeHead(404); res.end(JSON.stringify({ error: 'User not found' })); return; }
       if (user[cfg.field]) { res.writeHead(200); res.end(JSON.stringify({ status: 'already_done' })); return; }
 
-      // Award points (each event once per user)
       await supabase.from('users').update({ [cfg.field]: true }).eq('telegram_id', telegramId);
       await addPoints(telegramId, cfg.points, eventType);
 
